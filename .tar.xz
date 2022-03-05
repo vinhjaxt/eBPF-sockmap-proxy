@@ -1,0 +1,17 @@
+<html>
+  <title>404: File not found</title>
+  <style type="text/css">
+    h1 {
+      margin-top: 2em;
+    }
+  </style>
+  <body>
+    <div align="center">
+      <img
+        src="/images/bucket.jpg"
+        title="'Caramel Corn in Pail' by TheCulinaryGeek on Flickr. CC BY licence."
+      />
+      <h1>Sorry, we cannot find your kernels</h1>
+    </div>
+  </body>
+</html>

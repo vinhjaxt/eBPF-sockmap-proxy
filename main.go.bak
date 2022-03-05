@@ -1,0 +1,166 @@
+//go:build linux
+// +build linux
+// go get github.com/cilium/ebpf/cmd/bpf2go@master
+//go:generate bpf2go -cc clang-11 -cflags "-g -O2 -Wall -Wextra" bpf fentry.c ./linux-5.9.1/tools/lib/bpf/libbpf.a -- -I./linux-5.9.1/usr/include -I./linux-5.9.1/tools/lib -I./headers
+
+package main
+
+import (
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	MapsPinpath = "/sys/fs/bpf/echo_dispatch_prog"
+)
+const ServerAddr = "/tmp/echo_server"
+
+// sudo cat  /sys/kernel/debug/tracing/trace_pipe
+func main() {
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+
+	// Allow the current process to lock memory for eBPF resources.
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Panicln(err)
+	}
+
+	/*
+		// Create sockmap
+		var sockMap *ebpf.Map
+		sockMap, err := ebpf.NewMap(&ebpf.MapSpec{
+			Type:       ebpf.MapType(15), // BPF_MAP_TYPE_SOCKMAP
+			KeySize:    4,
+			ValueSize:  4,
+			MaxEntries: 2,
+		})
+		if err != nil {
+			log.Panicln(err)
+		}
+		defer sockMap.Close()
+		// */
+
+	// var options ebpf.CollectionOptions
+
+	// os.Mkdir(MapsPinpath, os.ModePerm)
+
+	// options.Maps.PinPath = MapsPinpath
+	// objs.bpfMaps.EchoSocket.FD()
+
+	// Load pre-compiled programs and maps into the kernel.
+	objs := bpfObjects{}
+	// err := loadBpfObjects(&objs, &options)
+	err := loadBpfObjects(&objs, nil)
+	if err != nil {
+		log.Panicln(err)
+	}
+	defer objs.Close()
+
+	// Attach program
+	netns, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		log.Panicln(err)
+	}
+	defer netns.Close()
+
+	lnk, err := link.AttachNetNs(int(netns.Fd()), objs.bpfPrograms.EchoDispatch)
+	defer lnk.Close()
+
+	// err = link.RawAttachProgram(link.RawAttachProgramOptions{
+	// 	Target:  int(netns.Fd()),
+	// 	Program: objs.bpfPrograms.EchoDispatch,
+	// 	Attach:  ebpf.AttachSkLookup,
+	// 	Flags:  0,
+	// })
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	// Create server
+
+	os.Remove(ServerAddr)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:8081")
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	go func() {
+		<-stopper
+		log.Println("Stoping..")
+		os.Exit(0)
+	}()
+
+	lnUnix := ln.(*net.TCPListener)
+	f, err := lnUnix.File()
+	if err != nil {
+		log.Panicln(err)
+	}
+
+	log.Println("Fd:", f.Fd())
+
+	log.Println(unix.SetsockoptInt(int(f.Fd()), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1))
+
+	err = objs.bpfMaps.EchoSocket.Put(uint32(0), uint64(f.Fd()))
+	if err != nil {
+		log.Panicln(err)
+	}
+	log.Println("Put done")
+
+	mapIter := objs.bpfMaps.EchoSocket.Iterate()
+	var keyOut1 uint32
+	var valOut1 uint64
+	log.Println(mapIter.Next(&keyOut1, &valOut1))
+	log.Println(keyOut1, valOut1)
+
+	err = objs.bpfMaps.EchoPorts.Put(uint16(0x0309), uint8(0))
+	if err != nil {
+		log.Panicln(err)
+	}
+	log.Println("Put done")
+
+	mapIter = objs.bpfMaps.EchoPorts.Iterate()
+	var keyOut uint16
+	var valOut uint8
+	log.Println(mapIter.Next(&keyOut, &valOut))
+	log.Println(keyOut, valOut)
+
+	// sysConn, err := lnUnix.SyscallConn()
+	// if err != nil {
+	// 	log.Panicln(err)
+	// }
+
+	// log.Println(sysConn)
+
+	log.Println("Accepting..")
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		log.Println("New conn")
+		go handleEcho(conn)
+	}
+
+}
+
+func handleEcho(conn net.Conn) {
+	buf := make([]byte, 1024)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		log.Println(string(buf[:n]))
+		conn.Write(buf[:n])
+	}
+}
